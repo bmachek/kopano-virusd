@@ -1,0 +1,132 @@
+#!/usr/bin/env python
+# coding=utf-8
+
+"""
+ICS driven virus scanner
+See included readme.md for more information.
+"""
+
+import shlex
+import subprocess
+import time
+import kopano
+import sssp
+import traceback
+from MAPI.Tags import *
+from kopano import Config, log_exc
+from thread import start_new_thread
+
+CONFIG = {
+	'run_as_user': Config.string(default="kopano"),
+	'run_as_group': Config.string(default="kopano"),
+	'autoremove': Config.boolean(default=False),
+	'sssp_ip': Config.string(default="127.0.0.1"),
+	'sssp_port': Config.integer(default=4010),
+	'batch_scan_interval': Config.integer(default=24*3600), # Scan all attachments every x seconds. Default 1d
+	'livescanner_enabled': Config.boolean(default=False),
+	'batchscanner_enabled': Config.boolean(default=False),
+	'virus_folder': Config.string(default="Cleaned"),
+}
+
+class Service(kopano.Service):
+	def main(self):
+		self.server = self.server
+		self.state = self.server.state
+		self.sssp_ip = self.config['sssp_ip']
+		self.sssp_port = self.config['sssp_port']
+		self.autoremove = self.config['autoremove'] # or self.options['autoremove']
+
+		if self.autoremove:
+			self.log.info("Autoremove is enabled.")
+		else:
+			self.log.info("Autoremove is disabled.")
+
+		try:
+			self.virus_scanner = sssp.sssp(self.sssp_ip, self.sssp_port)
+			self.virus_scanner.query_engine()
+			self.virus_scanner.query_server()
+		except:
+			self.log.error ('kopano-virusd terminating: Unknown SAVDI Error. {}'.format(traceback.format_exc()))
+			return
+		
+		self.catcher = Checker(self)
+		if self.config['livescanner_enabled']:
+			start_new_thread(self.livescanner, ())
+		if self.config['batchscanner_enabled']:
+			start_new_thread(self.batchscanner, ())
+		
+		while True:
+			time.sleep(24*3600)
+			self.log.info("Main thread woke up. Going asleep again.")
+		
+	def livescanner(self):
+		self.log.info ('LiveScanner: Enabled.')
+		while True:
+			try:
+				self.state = self.server.sync(self.catcher, self.state)
+			except Exception as e:
+				self.log.error('Error: [%s]' % e)
+				time.sleep(5)
+			time.sleep(1)
+
+	def batchscanner(self):
+		while True:
+			self.log.info ('BatchScanner: Starting')
+			for user in self.server.users():
+				self.log.info ('BatchScanner: Scanning user: [%s]' % user.name)
+				for folder in user.store.folders():
+					self.log.info ('BatchScanner: Scanning user: [%s] folder: [%s]' % (user.name, folder.name))
+					for item in folder.items():
+						self.scanmail(item)
+			self.log.info ('BatchScanner: Finished. Sleeping for ' + str(self.config['batch_scan_interval']) + " seconds")
+			time.sleep(self.config['batch_scan_interval'])
+
+	def scanmail(self, email):
+		user = email.store.user
+		for attachment in email.attachments():
+			try:
+				result, msg = self.virus_scanner.check(attachment.data)
+				virus = msg.replace('Message is infected with ', '')
+				if result:
+					continue
+				else:
+					self.log.error ('Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
+					try:
+						if self.autoremove:
+							self.delete_attachment(email, attachment, virus)
+					except Exception as del_e:
+						self.log.error ("Unable to remove attachment: [%s] [%s] [%s]" % (email.subject, attachment.name, del_e))
+			except Exception as e:
+				self.log.error ("Unable to scan attachment: [%s] [%s] [%s]" % (email.subject, attachment.name, e))
+
+
+	def delete_attachment(self, email, attachment, virus):
+		msg = "Attachment %s was infected with: %s" % (attachment.filename, virus)
+		self.log.info ('Autoremoving attachment: [%s]' % (attachment.name))
+		email.delete(attachment)
+		email.create_attachment(attachment.filename + "-removed.txt", msg)
+		email.subject = "[CLEANED] " + email.subject
+		email.text = msg + "\n" + email.text
+		email.move(email.store.folder(self.config['virus_folder'], None, False, True)) # Create if it doesn't exist.
+
+class Checker(object):
+	def __init__(self, service):
+		self.log = service.log
+		self.service = service
+
+
+	def update(self, item, flags):
+		if item.message_class == 'IPM.Note' and flags == 2048: # Only new mails are processed!??
+			self.service.scanmail(item)
+
+def main():
+	parser = kopano.parser('ckpsF')	 # select common cmd-line options
+	# parser.add_option("--autoremove", dest="autoremove", action="store_true", default=False, help="remove infected attachments")
+	options, args = parser.parse_args()
+	service = Service('virusd', config=CONFIG, options=options)
+	service.start()
+
+
+
+if __name__ == '__main__':
+	main()
