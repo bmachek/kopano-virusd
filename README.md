@@ -8,4 +8,9 @@
 ## Dependencies:
 * https://github.com/ixs/pysssp
 
+## Requirements:
+Running installation of:
+* sophos-av for Linux
+* Sophos SAVDI daemon
+
 More information to follow.
