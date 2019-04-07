@@ -21,12 +21,17 @@ CONFIG = {
 	'run_as_user': Config.string(default="kopano"),
 	'run_as_group': Config.string(default="kopano"),
 	'autoremove': Config.boolean(default=False),
+	'move_mails': Config.boolean(default=False),
 	'sssp_ip': Config.string(default="127.0.0.1"),
 	'sssp_port': Config.integer(default=4010),
 	'batch_scan_interval': Config.integer(default=24*3600), # Scan all attachments every x seconds. Default 1d
 	'livescanner_enabled': Config.boolean(default=False),
 	'batchscanner_enabled': Config.boolean(default=False),
 	'virus_folder': Config.string(default="Cleaned"),
+	'clean_subject_tag': Config.string(default="[CLEANED]"),
+	'virus_subject_tag': Config.string(default="[VIRUS]"),
+	'notification_mail_address': Config.string(default=""),
+	'notification_public_folder': Config.string(default=""),
 }
 
 class Service(kopano.Service):
@@ -35,7 +40,9 @@ class Service(kopano.Service):
 		self.state = self.server.state
 		self.sssp_ip = self.config['sssp_ip']
 		self.sssp_port = self.config['sssp_port']
+		self.virus_scanner = sssp.sssp(self.sssp_ip, self.sssp_port)
 		self.autoremove = self.config['autoremove'] # or self.options['autoremove']
+		self.public_store = self.server.company("Default").public_store # TODO
 
 		if self.autoremove:
 			self.log.info("Autoremove is enabled.")
@@ -72,19 +79,39 @@ class Service(kopano.Service):
 
 	def batchscanner(self):
 		while True:
+			virus_count = 0
 			self.log.info ('BatchScanner: Starting')
 			for user in self.server.users():
 				self.log.info ('BatchScanner: Scanning user: [%s]' % user.name)
 				for folder in user.store.folders():
 					self.log.info ('BatchScanner: Scanning user: [%s] folder: [%s]' % (user.name, folder.name))
 					for item in folder.items():
-						self.scanmail(item)
-			self.log.info ('BatchScanner: Finished. Sleeping for ' + str(self.config['batch_scan_interval']) + " seconds")
+						virus_count += self.scanmail(item)
+			self.log.info ('BatchScanner: Finished. Found: ' + str(virus_count) + ' Sleeping for ' + str(self.config['batch_scan_interval']) + " seconds")
 			time.sleep(self.config['batch_scan_interval'])
 
 	def scanmail(self, email):
 		user = email.store.user
 		virus_found = False
+		virus_count = 0
+		
+		virus_body = self.scan_body(email)
+		if virus_body != '': # Virus detected.
+			self.log.critical('Virus found: User: %s, Folder: %s, Subject: %s, Virus: %s' % (user.name, email.folder.name, email.subject, virus_body))
+			virus_found = True
+			virus_count += 1
+			if self.autoremove:
+				email.delete()
+			else:
+				email.subject = self.config['virus_subject_tag'] + " " + email.subject
+			if self.config['notification_mail_address'] != '':
+				notification = user.outbox.create_item(
+					to=self.config['notification_mail_address'],
+					subject='Virus found!',
+					body='Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
+				notification.send()
+				notification.copy(self.public_store.folder(self.config['notification_public_folder']))
+		
 		for attachment in email.attachments():
 			try:
 				virus = self.scan_attachment(attachment)
@@ -93,13 +120,20 @@ class Service(kopano.Service):
 				else:
 					self.log.critical('Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
 					virus_found = True
+					virus_count += 1
+					if self.config['notification_mail_address'] != '':
+						notification = user.outbox.create_item(
+							to=self.config['notification_mail_address'],
+							subject='Virus found!',
+							body='Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
+						notification.send()
+						notification.copy(self.public_store.folder(self.config['notification_public_folder']))
 					try:
 						if self.autoremove:
-							email.subject = "[CLEANED] " + email.subject
+							email.subject = self.config['clean_subject_tag'] + " " + email.subject
 							self.delete_attachment(email, attachment, virus)
 						else: 
-							email.mapiobj.SetProps([SPropValue(PR_SUBJECT_W, "[VIRUS] " + email.subject)])
-							email.mapiobj.SaveChanges(KEEP_OPEN_READWRITE)
+							email.subject = self.config['virus_subject_tag'] + " " + email.subject
 							msg = "Attachment %s *IS* infected with: %s" % (attachment.filename, virus)
 							email.text = msg + "\n" + email.text
 					except Exception as del_e:
@@ -107,8 +141,10 @@ class Service(kopano.Service):
 			except Exception as e:
 				self.log.error("Unable to scan attachment: User: %s, Folder: %s, Subject: %s, Filename: %s, Exception: %s" % (user.name, email.folder.name, email.subject, attachment.name, e))
 
-		if virus_found and self.autoremove:
+		if virus_found and self.autoremove and self.config['move_mails']:
 			email.move(email.store.folder(self.config['virus_folder'], None, False, True)) # Create if it doesn't exist.
+			
+		return virus_count
 
 
 	def delete_attachment(self, email, attachment, virus):
@@ -120,21 +156,35 @@ class Service(kopano.Service):
 		
 	def scan_attachment(self, attachment):
 		try:
-			virus_scanner = sssp.sssp(self.sssp_ip, self.sssp_port)
-			if not virus_scanner.selftest():
+			if not self.virus_scanner.selftest():
 				self.log.error("Virus scanner self-test failed. Will skip attachment %s. Sorry." % (attachment.filename))
 				return ''
-			result, msg = virus_scanner.check(attachment.data)
+			result, msg = self.virus_scanner.check(attachment.data)
 			if result:
 				return ''
 			else:
 				virus = msg.replace('Message is infected with ', '')
 				return virus
-			virus_scanner.disconnect()
 		except:
 			self.log.error('Virus scan engine reported an error: %s. Will have to skip attachment: %s. Sorry' % (traceback.format_exc(), attachment.filename))
 			return ''
 
+	def scan_body(self, email):
+		return '' # This has yet to be fixed.
+		try:
+			if not self.virus_scanner.selftest():
+				self.log.error("Virus scanner self-test failed. Will skip scanning email body %s. Sorry." % (email.subject))
+				return ''
+			result, msg = self.virus_scanner.check(email.eml())
+			if result:
+				return ''
+			else:
+				virus = msg.replace('Message is infected with ', '')
+				return virus
+		except:
+			self.log.error('Virus scan engine reported an error: %s. Will have to skip email body: %s. Sorry' % (traceback.format_exc(), email.subject))
+			return ''
+			
 class Checker(object):
 	def __init__(self, service):
 		self.log = service.log
@@ -147,7 +197,6 @@ class Checker(object):
 
 def main():
 	parser = kopano.parser('ckpsF')	 # select common cmd-line options
-	# parser.add_option("--autoremove", dest="autoremove", action="store_true", default=False, help="remove infected attachments")
 	options, args = parser.parse_args()
 	service = Service('virusd', config=CONFIG, options=options)
 	service.start()
