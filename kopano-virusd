@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 
-# Copyright 2019 by Bastian Machek (bm@machek.systems)
+# Copyright 2019 by Bastian Machek <bm@machek.systems>
 # https://github.com/bmachek/kopano-virusd
 # All rights reserved.
 
@@ -34,7 +34,8 @@ CONFIG = {
 	'clean_subject_tag': Config.string(default="[CLEANED]"),
 	'virus_subject_tag': Config.string(default="[VIRUS]"),
 	'notification_mail_address': Config.string(default=""),
-	'notification_public_folder': Config.string(default=""),
+	'notification_public_folder': Config.string(default="Virus"),
+	'notification_sender': Config.string(default=""),
 }
 
 class Service(kopano.Service):
@@ -77,6 +78,7 @@ class Service(kopano.Service):
 				self.state = self.server.sync(self.catcher, self.state)
 			except Exception as e:
 				self.log.error('Error: [%s]' % e)
+				self.send_notification('kopano-virusd: Error', 'Error: [%s]' % e)
 				time.sleep(5)
 			time.sleep(1)
 
@@ -110,12 +112,9 @@ class Service(kopano.Service):
 				email.delete()
 			else:
 				email.subject = self.config['virus_subject_tag'] + " " + email.subject
-			if self.config['notification_mail_address'] != '':
-				notification = user.outbox.create_item(
-					to=self.config['notification_mail_address'],
-					subject='Virus found!',
-					body='Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
-				notification.send()
+			
+			self.send_notification('Virus found!', 'Virus found: User: %s, Folder: %s, Subject: %s, Virus: %s' % (user.name, email.folder.name, email.subject, virus_body))
+
 		
 		for attachment in email.attachments():
 			try:
@@ -126,12 +125,7 @@ class Service(kopano.Service):
 					self.log.critical('Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
 					virus_found = True
 					virus_count += 1
-					if self.config['notification_mail_address'] != '':
-						notification = user.outbox.create_item(
-							to=self.config['notification_mail_address'],
-							subject='Virus found!',
-							body='Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
-						notification.send()
+					self.send_notification('Virus found!', 'Virus found: User: %s, Folder: %s, Subject: %s, Filename: %s, Virus: %s' % (user.name, email.folder.name, email.subject, attachment.name, virus))
 					try:
 						if self.autoremove:
 							email.subject = self.config['clean_subject_tag'] + " " + email.subject
@@ -142,9 +136,10 @@ class Service(kopano.Service):
 							email.text = msg + "\n" + email.text
 					except Exception as del_e:
 						self.log.error("Unable to remove attachment: [%s] [%s] [%s]" % (email.subject, attachment.name, del_e))
+						self.send_notification('kopano-virusd: Error', "Unable to remove attachment: [%s] [%s] [%s]" % (email.subject, attachment.name, del_e))
 			except Exception as e:
 				self.log.error("Unable to scan attachment: User: %s, Folder: %s, Subject: %s, Filename: %s, Exception: %s" % (user.name, email.folder.name, email.subject, attachment.name, e))
-
+				self.send_notification('kopano-virusd: Error', "Unable to scan attachment: User: %s, Folder: %s, Subject: %s, Filename: %s, Exception: %s" % (user.name, email.folder.name, email.subject, attachment.name, e))
 		if virus_found:
 			if self.config['notification_public_folder']:
 				public_copy = email.copy(self.public_store.folder(self.config['notification_public_folder']))
@@ -165,6 +160,7 @@ class Service(kopano.Service):
 		try:
 			if not self.virus_scanner.selftest():
 				self.log.error("Virus scanner self-test failed. Will skip attachment %s. Sorry." % (attachment.filename))
+				self.send_notification('kopano-virusd: Error', "Virus scanner self-test failed. Will skip attachment %s. Sorry." % (attachment.filename))
 				return ''
 			result, msg = self.virus_scanner.check(attachment.data)
 			if result:
@@ -174,6 +170,7 @@ class Service(kopano.Service):
 				return virus
 		except:
 			self.log.error('Virus scan engine reported an error: %s. Will have to skip attachment: %s. Sorry' % (traceback.format_exc(), attachment.filename))
+			self.send_notification('kopano-virusd: Error', 'Virus scan engine reported an error: %s. Will have to skip attachment: %s. Sorry' % (traceback.format_exc(), attachment.filename))
 			return ''
 
 	def scan_body(self, email):
@@ -181,6 +178,7 @@ class Service(kopano.Service):
 		try:
 			if not self.virus_scanner.selftest():
 				self.log.error("Virus scanner self-test failed. Will skip scanning email body %s. Sorry." % (email.subject))
+				self.send_notification('kopano-virusd: Error', "Virus scanner self-test failed. Will skip scanning email body %s. Sorry." % (email.subject))
 				return ''
 			result, msg = self.virus_scanner.check(email.eml())
 			if result:
@@ -190,7 +188,16 @@ class Service(kopano.Service):
 				return virus
 		except:
 			self.log.error('Virus scan engine reported an error: %s. Will have to skip email body: %s. Sorry' % (traceback.format_exc(), email.subject))
+			self.send_notification('kopano-virusd: Error', 'Virus scan engine reported an error: %s. Will have to skip email body: %s. Sorry' % (traceback.format_exc(), email.subject))
 			return ''
+			
+	def send_notification(self, subject, msg):
+		if self.config['notification_public_folder'] != '' and self.config['notification_sender']:
+			notification = self.server.user(self.config['notification_sender']).outbox.create_item(
+				to=self.config['notification_mail_address'],
+				subject=subject,
+				body=msg)
+			notification.send()
 			
 class Checker(object):
 	def __init__(self, service):
