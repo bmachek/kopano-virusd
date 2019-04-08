@@ -83,14 +83,17 @@ class Service(kopano.Service):
 	def batchscanner(self):
 		while True:
 			virus_count = 0
+			scanned_mails_count = 0
+			start_time = time.time()
 			self.log.info ('BatchScanner: Starting')
 			for user in self.server.users():
-				self.log.info ('BatchScanner: Scanning user: [%s]' % user.name)
+				self.log.info('BatchScanner: Scanning user: [%s]' % user.name)
 				for folder in user.store.folders():
 					self.log.info ('BatchScanner: Scanning user: [%s] folder: [%s]' % (user.name, folder.name))
 					for item in folder.items():
 						virus_count += self.scanmail(item)
-			self.log.info ('BatchScanner: Finished. Found: ' + str(virus_count) + ' Sleeping for ' + str(self.config['batch_scan_interval']) + " seconds")
+						scanned_mails_count += 1
+			self.log.info('BatchScanner: Finished. Scanned %s in %s secs. Found viruses: %s Sleeping for %s seconds' % (scanned_mails_count, time.time() - start_time, virus_count, self.config['batch_scan_interval']))
 			time.sleep(self.config['batch_scan_interval'])
 
 	def scanmail(self, email):
