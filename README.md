@@ -4,6 +4,7 @@
 * kopano-spamd
 * https://github.com/bkram/kopano-scan-attachments
 * https://github.com/ixs/pysssp
+* https://gist.github.com/c-rosenberg/671b0a5d8b1b5a937e3e161f8515c666
 
 ## Dependencies:
 * https://github.com/ixs/pysssp
