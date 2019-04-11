@@ -1,0 +1,16 @@
+[Unit]
+Description=Sophos SAV Dynamic Interface Daemon
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/savdid.pid
+ExecStart=/usr/local/bin/savdid -d -c /etc/savdid.conf -f /var/run/savdid.pid -s -l
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
